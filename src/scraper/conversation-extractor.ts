@@ -167,7 +167,9 @@ export class ConversationExtractor {
       const timeout = setTimeout(() => {
         if (!resolved) {
           if (allEntries.length > 0) {
-            logger.info(`API response timeout – resolving with ${allEntries.length} accumulated entries`)
+            logger.info(
+              `API response timeout – resolving with ${allEntries.length} accumulated entries`
+            )
             resolve({ entries: allEntries })
           } else {
             logger.warn('API response timeout – resolving with null')
@@ -196,7 +198,7 @@ export class ConversationExtractor {
           if (resolved) return
 
           const parseResult = ConversationExtractor.ApiResponseSchema.safeParse(json)
-        
+
           if (!parseResult.success) {
             this.diagnostics.writeFailure({
               url: response.url(),
