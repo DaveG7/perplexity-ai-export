@@ -78,7 +78,7 @@ Our RAG implementation is not a simple "retrieve and stuff" pipeline. It follows
 
 Before any retrieval, the system acts as a **Research Planner**. It decomposes the user's query into:
 
-- **Strategy**: Selecting between \`precise\` (targeted facts) or \`exhaustive\` (broad historical overview).
+- **Strategy**: Selecting between `precise` (targeted facts) or `exhaustive` (broad historical overview).
 - **Semantic Variations**: Generating multiple search phrases to cover different linguistic facets of the query.
 - **Hard Keywords**: Identifying unique entities or technical IDs that require exact-match precision.
 
@@ -86,8 +86,8 @@ Before any retrieval, the system acts as a **Research Planner**. It decomposes t
 
 We employ a **Hybrid Search** strategy, combining the strengths of dense and sparse retrieval:
 
-- **Dense (Vector)**: Captures semantic intent and conceptual similarity using embeddings (\`nomic-embed-text\`).
-- **Sparse (Exact)**: Leverages \`ripgrep\` for high-velocity exact string matching, ensuring technical IDs or specific names are never missed.
+- **Dense (Vector)**: Captures semantic intent and conceptual similarity using embeddings (`nomic-embed-text`).
+- **Sparse (Exact)**: Leverages `ripgrep` for high-velocity exact string matching, ensuring technical IDs or specific names are never missed.
 
 Results are then merged using **Reciprocal Rank Fusion (RRF)**, which provides a robust ranking by combining the ordinal positions of items from different search pools without needing normalized scores.
 
@@ -107,7 +107,7 @@ Our architecture is informed by several key papers and concepts in the field of 
 ### Hybrid Search & RRF
 
 - **Reciprocal Rank Fusion (RRF)**: Based on the principle that combining multiple search orderings can significantly outperform any single ordering.
-  - _Reference:_ [Cormack et al., 2009. Reciprocal Rank Fusion outperforms Condorcet and Individual Rank Classifiers.](https://arxiv.org/abs/1407.5645)
+  - _Reference:_ [Cormack et al., 2009. Reciprocal Rank Fusion outperforms Condorcet and Individual Rank Learning Methods.](https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf) (SIGIR 2009, DOI: 10.1145/1571941.1572114)
 
 ### Retrieval-Augmented Generation (RAG)
 
