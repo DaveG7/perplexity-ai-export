@@ -18,9 +18,11 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:ci": "vitest run --reporter=verbose",
+    "benchmark": "tsx src/benchmark.ts",
     "prepare": "husky"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.5.0",
     "@inquirer/prompts": "^8.5.0",
     "@vscode/ripgrep": "^1.17.1",
     "chalk": "^5.6.2",

@@ -7,6 +7,26 @@ import chalk from 'chalk'
 import { join } from 'node:path'
 import { type Config } from '../utils/config.js'
 
+// Cross-encoder reranker — loaded lazily on first use (downloads ~85MB ONNX model once)
+let _tokenizer: any = null
+let _model: any = null
+
+async function getCrossEncoder() {
+  if (!_tokenizer || !_model) {
+    // @ts-expect-error — optional peer dep, gracefully skipped if not installed
+    const { AutoTokenizer, AutoModelForSequenceClassification } = await import(
+      '@huggingface/transformers'
+    ).catch(() => null)
+    if (!AutoTokenizer) return null
+    _tokenizer = await AutoTokenizer.from_pretrained('Xenova/ms-marco-MiniLM-L-6-v2')
+    _model = await AutoModelForSequenceClassification.from_pretrained(
+      'Xenova/ms-marco-MiniLM-L-6-v2',
+      { dtype: 'int8' }
+    )
+  }
+  return { tokenizer: _tokenizer, model: _model }
+}
+
 export class RagOrchestrator {
   private vectorStore: VectorStore
   private ollamaClient: OllamaClient
@@ -38,10 +58,15 @@ export class RagOrchestrator {
         logger.info(`Hard Keywords detected: ${chalk.gray(researchPlan.hardKeywords.join(', '))}`)
       }
 
+      if (researchPlan.hydePassage) {
+        logger.debug(`HyDE passage generated: "${researchPlan.hydePassage.slice(0, 80)}..."`)
+      }
+
       const searchResults = await this.executeAdaptiveHybridSearch(researchPlan)
+      const rerankedResults = await this.crossEncoderRerank(question, searchResults)
       const contextFacts = await this.extractFactsWithGranularMapReduce(
         question,
-        searchResults,
+        rerankedResults,
         exhaustiveMode
       )
 
@@ -71,6 +96,7 @@ export class RagOrchestrator {
     strategy: 'precise' | 'exhaustive'
     queries: string[]
     hardKeywords: string[]
+    hydePassage: string
     filters: any
   }> {
     const plannerPrompt = `
@@ -78,7 +104,8 @@ Analyze: "${originalQuestion}"
 1. Strategy: "precise" (specific facts) or "exhaustive" (broad summary/entity history).
 2. Variations: 3 semantic search phrases.
 3. Hard Keywords: Identify any names, IDs, or unique technical terms for exact matching.
-Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "filters": {}}
+4. HyDE: Write 1-2 sentences that would plausibly appear in a saved answer to this question. Write as if it's content already stored, not as a reply.
+Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "hydePassage": "...", "filters": {}}
 `
     try {
       const response = await this.ollamaClient.generate(plannerPrompt)
@@ -87,16 +114,24 @@ Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "filters": {
         strategy: json.strategy || 'precise',
         queries: json.queries || [originalQuestion],
         hardKeywords: json.hardKeywords || [],
+        hydePassage: json.hydePassage || '',
         filters: json.filters || {},
       }
     } catch (_err) {
-      return { strategy: 'precise', queries: [originalQuestion], hardKeywords: [], filters: {} }
+      return {
+        strategy: 'precise',
+        queries: [originalQuestion],
+        hardKeywords: [],
+        hydePassage: '',
+        filters: {},
+      }
     }
   }
 
   private async executeAdaptiveHybridSearch(plan: {
     queries: string[]
     hardKeywords: string[]
+    hydePassage: string
   }): Promise<VectorSearchResult[]> {
     const searchPools: VectorSearchResult[][] = []
 
@@ -105,6 +140,13 @@ Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "filters": {
       logger.debug(`Executing semantic search [${i + 1}/${plan.queries.length}]: "${q}"`)
       const res = await this.vectorStore.search(q, 40)
       searchPools.push(res)
+    }
+
+    // HyDE: search using the hypothetical document passage for better semantic match
+    if (plan.hydePassage) {
+      logger.debug(`Executing HyDE search: "${plan.hydePassage.slice(0, 60)}..."`)
+      const hydeResults = await this.vectorStore.search(plan.hydePassage, 40)
+      searchPools.push(hydeResults)
     }
 
     const keywordPool: VectorSearchResult[] = []
@@ -155,12 +197,56 @@ Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "filters": {
       .map((v) => v.res)
   }
 
+  /**
+   * Cross-encoder reranking using Xenova/ms-marco-MiniLM-L-6-v2 (ONNX, runs locally).
+   * Gracefully falls back to original order if @huggingface/transformers is not installed.
+   * Install: npm install @huggingface/transformers
+   */
+  private async crossEncoderRerank(
+    question: string,
+    results: VectorSearchResult[]
+  ): Promise<VectorSearchResult[]> {
+    if (results.length === 0) return results
+
+    const ce = await getCrossEncoder()
+    if (!ce) {
+      logger.debug('Cross-encoder not available (run: npm install @huggingface/transformers). Skipping rerank.')
+      return results
+    }
+
+    const { tokenizer, model } = ce
+    logger.info(`Cross-encoder reranking ${results.length} candidates...`)
+
+    const BATCH_SIZE = 64
+    const scores: number[] = new Array(results.length).fill(0)
+
+    for (let i = 0; i < results.length; i += BATCH_SIZE) {
+      const batch = results.slice(i, i + BATCH_SIZE)
+      const pairs = batch.map((r) => [question, (r.meta['snippet'] as string) || ''])
+      const inputs = await tokenizer(pairs.map(p => p[0]), {
+        text_pair: pairs.map(p => p[1]),
+        padding: true,
+        truncation: true,
+      })
+      const output = await model(inputs)
+      // Read raw logits directly — do NOT use pipeline() which returns score: 1.0 always
+      const logits: number[] = Array.from(output.logits.data as Float32Array)
+      logits.forEach((s, j) => { scores[i + j] = s })
+    }
+
+    return results
+      .map((res, i) => ({ res, score: scores[i]! }))
+      .sort((a, b) => b.score - a.score)
+      .map((v) => v.res)
+  }
+
   private async extractFactsWithGranularMapReduce(
     question: string,
     results: VectorSearchResult[],
     exhaustive: boolean
   ): Promise<any[]> {
-    const poolLimit = exhaustive ? 60 : 20
+    // Bumped from 20 → 35 in precise mode to reduce missed details
+    const poolLimit = exhaustive ? 60 : 35
     const pool = results.slice(0, poolLimit)
     if (pool.length === 0) return []
 
