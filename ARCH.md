@@ -19,6 +19,7 @@ This document elucidates the architectural blueprints and theoretical underpinni
   * [Retrieval-Augmented Generation (RAG)](#retrieval-augmented-generation-rag)
   * [MapReduce for Context Compression](#mapreduce-for-context-compression)
 - [4. Visualizing the Retrieval Loop](#4-visualizing-the-retrieval-loop)
+- [5. Glossary](#5-glossary)
 
 <!-- tocstop -->
 
@@ -184,3 +185,34 @@ sequenceDiagram
     MR->>N: Verified Fact List
     N->>U: Final Synthesized Answer
 ```
+
+---
+
+## 5. Glossary
+
+Plain-language definitions for every technical term used in this document.
+
+| Term | Simple explanation |
+|---|---|
+| **RAG** (Retrieval-Augmented Generation) | Instead of the AI making things up from memory, it first searches your actual saved data, then uses those results to write the answer. Think: open-book exam vs. closed-book. |
+| **Embedding / Vector** | Turning a piece of text into a list of numbers that captures its meaning. Texts with similar meaning end up with similar numbers, so you can find related content by comparing numbers. |
+| **Vector Store (Vectra)** | A database that stores those number-lists (embeddings) and can quickly find the ones most similar to a query. Like a library that sorts books by vibe instead of title. |
+| **Bi-Encoder** | Two separate "understanding machines" — one encodes the query, one encodes each passage — and you compare the resulting numbers. Fast, but the query and passage never "see" each other during encoding, so subtle relevance signals can be missed. |
+| **Cross-Encoder** | One "understanding machine" that reads the query and a passage *together* at the same time. Much more accurate at judging relevance, but slower — used as a second pass after bi-encoder retrieval narrows the field. |
+| **Reranking** | Taking a first batch of search results and sorting them again with a smarter (but slower) method. The first pass casts a wide net; reranking picks the actual best ones. |
+| **Dense Retrieval** | Search by meaning/semantics using embeddings. Good at finding conceptually related content even if the exact words differ. |
+| **Sparse Retrieval** | Search by exact keywords or strings (e.g. ripgrep). Perfect for finding specific names, IDs, or code snippets that embeddings might miss. |
+| **Hybrid Search** | Combining dense (meaning) and sparse (keyword) retrieval so you get the benefits of both. |
+| **RRF** (Reciprocal Rank Fusion) | A formula for merging ranked lists from multiple search methods into one combined ranking. It rewards results that appear near the top in multiple lists, without needing to normalize scores. |
+| **HyDE** (Hypothetical Document Embeddings) | Before searching, ask the LLM: "What would a good answer to this question look like?" Then search using *that* hypothetical answer instead of the raw question. Helps when your question phrasing doesn't match how the answer was originally written. |
+| **MapReduce** | A two-step processing pattern: **Map** = process many small chunks independently in parallel; **Reduce** = combine all those results into one final output. Used here to extract facts from many snippets without overloading the LLM's context window. |
+| **Context Window** | The maximum amount of text an LLM can read and reason about at once. Stuffing too many search results in at once causes the model to "lose" information in the middle — hence MapReduce. |
+| **Lost in the Middle** | A known LLM failure mode: when given a very long input, the model tends to remember the start and end well but forgets details buried in the middle. MapReduce mitigates this by processing small chunks. |
+| **ONNX** | A standard file format for AI models that lets them run efficiently on different hardware and in different programming languages — including Node.js — without needing Python or a GPU. |
+| **Quantization (int8)** | Compressing a model's internal numbers from 32-bit floats down to 8-bit integers. Makes the model ~3–4× faster and smaller with minimal accuracy loss. |
+| **LLM** (Large Language Model) | The AI model that reads text and generates responses — in this project, served locally via Ollama (e.g. mistral, llama3). |
+| **Ollama** | A local server that runs open-source LLMs on your own machine. No API key, no cloud, no data leaving your device. |
+| **Playwright** | A browser automation library used here to scrape conversation history from Perplexity.ai and save it as Markdown files. |
+| **ripgrep (rg)** | An extremely fast command-line search tool that scans files for exact text matches. Used here for the sparse/keyword retrieval leg of hybrid search. |
+| **nomic-embed-text** | The embedding model (run via Ollama) that converts text snippets into vectors for storage and similarity search in Vectra. |
+| **Provenance** | Knowing exactly which source document a fact came from. The system tracks this so the final answer can cite where each piece of information originated. |
