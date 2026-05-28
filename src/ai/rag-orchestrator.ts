@@ -96,7 +96,7 @@ export class RagOrchestrator {
     queries: string[]
     hardKeywords: string[]
     hydePassage: string
-    filters: any
+    filters: Record<string, unknown>
   }> {
     const plannerPrompt = `
 Analyze: "${originalQuestion}"
@@ -256,7 +256,7 @@ Return JSON: {"strategy": "...", "queries": [], "hardKeywords": [], "hydePassage
     const pool = results.slice(0, poolLimit)
     if (pool.length === 0) return []
 
-    const findings: any[] = []
+    const findings: unknown[] = []
     const batchSize = 10
     const totalBatches = Math.ceil(pool.length / batchSize)
 
@@ -298,14 +298,14 @@ Return JSON array: [{"fact": "...", "node_id": N, "thread": "..."}]
 
   private async generateMightiestResponse(
     question: string,
-    findings: any[],
+    findings: unknown[],
     strategy: string
   ): Promise<string> {
     const prompt = `
 You are the Narrator. Synthesize these research findings into a cohesive, mightiest answer for: "${question}"
 Strategy: ${strategy}
 Findings:
-${findings.map((f, i) => `[Find ${i}] (${f.source_title}): ${f.fact}`).join('\n')}
+${findings.map((f: any, i) => `[Find ${i}] (${f.source_title}): ${f.fact}`).join('\n')}
 
 INSTRUCTIONS:
 1. Provide a comprehensive, authoritative response.
@@ -318,7 +318,7 @@ ANSWER:
     return this.ollamaClient.generate(prompt)
   }
 
-  private displaySourceProvenance(facts: any[]): void {
+  private displaySourceProvenance(facts: unknown[]): void {
     const uniqueThreads = new Set(facts.map((f: any) => f.source_title))
     if (uniqueThreads.size > 0) {
       console.log(`\n${chalk.bold.cyan('History Sources Explored:')}`)
@@ -329,7 +329,7 @@ ANSWER:
   private async verifyAnswerQuality(
     question: string,
     answer: string,
-    _facts: any[]
+    _facts: unknown[]
   ): Promise<{ status: string; suggestion?: string }> {
     const prompt = `
 Verify the answer.

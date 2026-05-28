@@ -1,13 +1,15 @@
+import { createHash } from 'node:crypto'
 import { errorBus } from '../utils/error-bus.js'
-import type { BrowserContext, Page, Response } from '@playwright/test'
-import { waitStrategy } from '../utils/wait-strategy.js'
-import { logger } from '../utils/logger.js'
 import { z } from 'zod'
+import { type Page, type BrowserContext, type Response } from '@playwright/test'
+import { logger } from '../utils/logger.js'
+import { waitStrategy } from '../utils/wait-strategy.js'
 import { ApiDiagnosticsWriter } from '../utils/api-diagnostics.js'
 import { type Config } from '../utils/config.js'
 
 export interface ExtractedConversation {
   id: string
+  contentHash: string
   title: string
   spaceName: string
   timestamp: Date
@@ -160,8 +162,8 @@ export class ConversationExtractor {
     }
   }
 
-  private captureConversationApiResponse(page: Page): Promise<any> {
-    let allEntries: any[] = []
+  private captureConversationApiResponse(page: Page): Promise<unknown> {
+    let allEntries: unknown[] = []
     let resolved = false
 
     return new Promise((resolve) => {
@@ -259,7 +261,21 @@ export class ConversationExtractor {
     }
   }
 
-  private parseConversationData(data: any, url: string): ExtractedConversation | null {
+  private hashEntries(rawEntries: unknown[]): string {
+    // Stringify with full content
+    const stable = JSON.stringify(rawEntries, (_key, value) => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            return Object.keys(value).sort().reduce((sorted: Record<string, unknown>, key) => {
+                sorted[key] = (value as Record<string, unknown>)[key];
+                return sorted;
+            }, {});
+        }
+        return value;
+    });
+    return createHash('sha256').update(stable).digest('hex')
+  }
+
+  private parseConversationData(data: unknown, url: string): ExtractedConversation | null {
     try {
       const entries = this.ensureEntriesFormat(data, url)
 
@@ -284,10 +300,15 @@ export class ConversationExtractor {
       const validEntries = parseResult.data
       const firstEntry = validEntries[0]!
       const id = this.extractIdFromUrl(url)
-      const title = firstEntry.thread_title ?? data.thread_title ?? 'Untitled'
+
+      const threadTitle = (data as any)?.thread_title
+      const collectionTitle = (data as any)?.collection_info?.title
+
+      const title = firstEntry.thread_title ?? threadTitle ?? 'Untitled'
       const spaceName =
-        firstEntry.collection_info?.title ?? data.collection_info?.title ?? 'General'
+        firstEntry.collection_info?.title ?? collectionTitle ?? 'General'
       const timestamp = this.extractTimestamp(firstEntry, data)
+      const contentHash = this.hashEntries(validEntries)
       const content = this.convertEntriesToMarkdown(validEntries, title)
 
       if (!content) {
@@ -295,21 +316,23 @@ export class ConversationExtractor {
         return null
       }
 
-      return { id, title, spaceName, timestamp, content }
+      return { id, title, spaceName, timestamp, content, contentHash }
     } catch (_error) {
       errorBus.emitError('Failed to parse conversation data.')
       return null
     }
   }
 
-  private ensureEntriesFormat(data: any, url: string): any[] {
+  private ensureEntriesFormat(data: unknown, url: string): unknown[] {
     if (Array.isArray(data)) {
       return data
     }
-    if (data && Array.isArray(data.entries)) {
-      return data.entries
+
+    const d = data as Record<string, unknown>
+    if (d && Array.isArray(d.entries)) {
+      return d.entries
     }
-    if (data && (data.query_str || data.blocks)) {
+    if (d && (d.query_str || d.blocks)) {
       return [data]
     }
 
@@ -328,16 +351,17 @@ export class ConversationExtractor {
     return match?.[1] ?? 'unknown'
   }
 
-  private extractTimestamp(firstEntry: any, data: any): Date {
-    const ts = firstEntry.updated_datetime ?? data.updated_datetime
+  private extractTimestamp(firstEntry: any, data: unknown): Date {
+    const ts = firstEntry.updated_datetime ?? (data as any)?.updated_datetime
     return ts ? new Date(ts) : new Date()
   }
 
-  private convertEntriesToMarkdown(entries: any[], threadTitle: string): string {
+  private convertEntriesToMarkdown(entries: unknown[], threadTitle: string): string {
     let markdown = ''
+    const typedEntries = entries as any[]
 
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i]
+    for (let i = 0; i < typedEntries.length; i++) {
+      const entry = typedEntries[i]
       let question = entry.query_str ?? ''
 
       if (!question) {
