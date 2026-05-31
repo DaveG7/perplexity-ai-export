@@ -50,10 +50,10 @@ export const logger = {
 
   debug(...args: unknown[]): void {
     const isVerboseDebug = process.env['DEBUG'] === 'true'
-    if (isVerboseDebug) {
-      const message = args.join(' ')
-      console.log(chalk.gray('›'), message)
-      writeToLogFile(`DEBUG: ${message}`)
-    }
+    if (!isVerboseDebug) return
+
+    const message = args.join(' ')
+    console.log(chalk.gray('›'), message)
+    writeToLogFile(`DEBUG: ${message}`)
   },
 }

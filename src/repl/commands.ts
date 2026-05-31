@@ -200,7 +200,7 @@ export class CommandHandler {
 
   private async runDiscoveryPhase(page: Page): Promise<void> {
     logger.info('\n=== Phase 1: Library Discovery ===\n')
-    const discoveryTool = new LibraryDiscovery(this.config)
+    const discoveryTool = new LibraryDiscovery()
     const discoveredConversations = await discoveryTool.discoverAllConversationsFromLibrary(page)
     this.checkpointManager.setDiscoveredConversations(discoveredConversations)
   }

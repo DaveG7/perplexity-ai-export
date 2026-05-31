@@ -3,15 +3,18 @@
   "version": "1.1.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
+  "author": "simwai",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc",
     "build:exe": "node scripts/build-exe.js && npm run format",
     "release": "release-it",
-    "type-check": "tsc --noEmit",
     "toc": "node scripts/update-toc.js",
+    "type-check": "tsc --noEmit",
     "format": "oxlint --fix --format=stylish && oxfmt",
+    "format-type-check": "pnpm exec concurrently \"pnpm type-check\" \"pnpm format\"",
     "test": "vitest",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
@@ -37,6 +40,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "concurrently": "^10.0.0",
     "@commitlint/cli": "^20.4.4",
     "@commitlint/config-conventional": "^20.4.4",
     "@playwright/test": "^1.58.2",

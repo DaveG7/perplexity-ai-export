@@ -138,9 +138,22 @@ export class BrowserManager {
       this.activeContext = await this.browserInstance.newContext()
     }
 
-    if (this.config.debugMode && this.activeContext) {
-      this.activeContext.on('request', (req) => logHttpRequest(req))
-      this.activeContext.on('response', (res) => logHttpResponse(res))
+    if (this.config.debug && this.activeContext) {
+      this.activeContext.on('request', (req) => {
+        const requestUrl = req.url()
+        const isRelevantUrl =
+          (requestUrl.includes('perplexity.ai/rest') || requestUrl.includes('perplexity.ai/api')) &&
+          !requestUrl.includes('static')
+        if (isRelevantUrl) logHttpRequest(req)
+      })
+      this.activeContext.on('response', (res) => {
+        const responseUrl = res.url()
+        const isRelevantUrl =
+          (responseUrl.includes('perplexity.ai/rest') ||
+            responseUrl.includes('perplexity.ai/api')) &&
+          !responseUrl.includes('static')
+        if (isRelevantUrl) logHttpResponse(res)
+      })
     }
   }
 
@@ -165,7 +178,7 @@ export class BrowserManager {
 
     this.activePage = await this.activeContext.newPage()
     const SETTINGS_URL = 'https://www.perplexity.ai/settings'
-    const NAVIGATION_TIMEOUT_MS = 3000
+    const NAVIGATION_TIMEOUT_MS = 15_000
 
     try {
       await this.activePage.goto(SETTINGS_URL, {
@@ -210,26 +223,33 @@ export class BrowserManager {
   }
 
   private async verifyLoginStatus(page: Page): Promise<boolean> {
-    const INTERMEDIATE_DELAY_MS = 1000
-    const NETWORK_IDLE_TIMEOUT_MS = 5000
+    await page.waitForTimeout(1000).catch(() => {})
+    await page.waitForLoadState('domcontentloaded').catch(() => {})
 
-    await page.waitForTimeout(INTERMEDIATE_DELAY_MS).catch(() => {})
-    await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS }).catch(() => {})
+    const result = await page.evaluate(async () => {
+      try {
+        const res = await fetch('/api/auth/session', {
+          method: 'GET',
+          credentials: 'include',
+        })
+        const text = await res.text()
+        return { body: text }
+      } catch (error) {
+        return { body: '' }
+      }
+    })
 
-    const currentUrl = page.url()
-    const AUTHENTICATED_PATHS = ['/settings', '/library', '/collections', '/account/details']
-    const isUrlAuthenticated = AUTHENTICATED_PATHS.some((path) => currentUrl.includes(path))
+    logger.debug(`verifyLoginStatus: body=${result.body}`)
 
-    if (isUrlAuthenticated) {
-      return true
+    const trimmed = result.body.trim()
+    if (!trimmed) return false
+
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>
+      return Boolean(parsed.user || parsed.expires || parsed.email)
+    } catch {
+      return false
     }
-
-    const userMenuCount = await page
-      .locator('[data-testid="user-menu"]')
-      .count()
-      .catch(() => 0)
-
-    return userMenuCount > 0
   }
 
   private async persistAuthenticationState(): Promise<void> {

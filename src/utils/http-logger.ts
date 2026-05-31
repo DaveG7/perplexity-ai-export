@@ -53,7 +53,7 @@ function ensureLogsDirectoryExists(): void {
 }
 
 export async function logHttpRequest(request: Request): Promise<void> {
-  if (!config.debugMode) return
+  if (!config.debug) return
 
   ensureLogsDirectoryExists()
 
@@ -62,10 +62,7 @@ export async function logHttpRequest(request: Request): Promise<void> {
   const sanitizedHeaders = redactSensitiveHeaders(request.headers())
   const rawPostData = request.postData()
 
-  let requestBody = rawPostData
-  if (isPromptRequest(requestUrl, rawPostData)) {
-    requestBody = '[PROMPT REDACTED]'
-  }
+  const requestBody = isPromptRequest(requestUrl, rawPostData) ? '[PROMPT REDACTED]' : rawPostData
 
   const logTimestamp = new Date().toISOString()
   const logEntry = [
@@ -79,7 +76,7 @@ export async function logHttpRequest(request: Request): Promise<void> {
 }
 
 export async function logHttpResponse(response: Response): Promise<void> {
-  if (!config.debugMode) return
+  if (!config.debug) return
 
   const originalRequest = response.request()
   const responseUrl = originalRequest.url()
