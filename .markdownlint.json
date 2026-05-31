@@ -1,4 +1,7 @@
 {
+  "MD040": false,
+  "MD047": false,
+  "MD004": false,
   "table-column-style": false,
   "first-line-h1": false,
   "no-inline-html": false,
@@ -9,7 +12,7 @@
     "style": "backtick"
   },
   "emphasis-style": {
-    "style": "asterisk"
+    "style": "underscore"
   },
   "extended-ascii": {
     "ascii-only": true
@@ -39,7 +42,7 @@
   },
   "line-length": false,
   "ul-style": {
-    "style": "dash"
+    "style": "consistent"
   },
   "single-h1": false
 }
