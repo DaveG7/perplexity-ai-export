@@ -16,6 +16,7 @@ export class WorkerPool {
   private readonly workers: ExtractionWorker[] = []
   private readonly fileWriter: FileWriter
   private sharedBrowserContext: BrowserContext | null = null
+  private isRefreshing = false
 
   constructor(
     private readonly config: Config,
@@ -27,14 +28,16 @@ export class WorkerPool {
 
   async initialize(): Promise<void> {
     try {
-      this.sharedBrowserContext = await this.browser.newContext()
+      this.sharedBrowserContext = await this.browser.newContext({
+        storageState: this.config.authStoragePath,
+      })
 
       const workerCount = this.config.parallelWorkers
       for (let i = 0; i < workerCount; i++) {
         const extractor = new ConversationExtractor(this.config, this.sharedBrowserContext)
         this.workers.push({
           id: i,
-          extractor: extractor,
+          extractor,
           isBusy: false,
         })
       }
@@ -74,7 +77,7 @@ export class WorkerPool {
               this.checkpointManager.markAsProcessed(conversationMetadata.id)
               logger.info(`${progressLabel} Up to date: ${extractionResult.title} (skipped write)`)
             } else {
-              await this.fileWriter.write(extractionResult)
+              this.fileWriter.write(extractionResult)
               this.checkpointManager.markAsProcessed(
                 conversationMetadata.id,
                 extractionResult.contentHash
@@ -121,19 +124,25 @@ export class WorkerPool {
   }
 
   private async refreshContext(): Promise<void> {
+    if (this.isRefreshing) return
+    this.isRefreshing = true
+
     try {
-      const isContextOpen = !!this.sharedBrowserContext
-      if (isContextOpen) {
-        await this.sharedBrowserContext!.close().catch(() => {})
+      if (this.sharedBrowserContext) {
+        await this.sharedBrowserContext.close().catch(() => {})
       }
 
-      this.sharedBrowserContext = await this.browser.newContext()
+      this.sharedBrowserContext = await this.browser.newContext({
+        storageState: this.config.authStoragePath,
+      })
 
       for (const worker of this.workers) {
         worker.extractor = new ConversationExtractor(this.config, this.sharedBrowserContext)
       }
     } catch (error) {
       errorBus.emitError('Failed to refresh worker context', error)
+    } finally {
+      this.isRefreshing = false
     }
   }
 }

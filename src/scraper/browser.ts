@@ -257,6 +257,17 @@ export class BrowserManager {
       throw new BrowserManager.AuthError('No browser context available to save')
     }
     const currentStorageState = await this.activeContext.storageState()
+    logger.debug(
+      `Persisting auth state: ${currentStorageState.cookies.length} cookies, ${currentStorageState.origins.length} origins`
+    )
+
+    if (currentStorageState.cookies.length === 0) {
+      logger.warn(
+        'persistAuthenticationState: no cookies found — skipping write to avoid overwriting valid state'
+      )
+      return
+    }
+
     const serializedState = JSON.stringify(currentStorageState, null, 2)
     writeFileSync(this.config.authStoragePath, serializedState)
   }
