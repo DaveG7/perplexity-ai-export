@@ -6,10 +6,18 @@ import { FileWriter } from '../export/file-writer.js'
 import { logger } from '../utils/logger.js'
 import { type Config } from '../utils/config.js'
 
+const MAX_RETRIES = 2
+const POLLING_INTERVAL_MS = 100
+
 interface ExtractionWorker {
   id: number
   extractor: ConversationExtractor
   isBusy: boolean
+}
+
+interface QueueItem {
+  meta: ConversationMeta
+  attempts: number
 }
 
 export class WorkerPool {
@@ -31,13 +39,10 @@ export class WorkerPool {
       this.sharedBrowserContext = await this.browser.newContext({
         storageState: this.config.authStoragePath,
       })
-
-      const workerCount = this.config.parallelWorkers
-      for (let i = 0; i < workerCount; i++) {
-        const extractor = new ConversationExtractor(this.config, this.sharedBrowserContext)
+      for (let i = 0; i < this.config.parallelWorkers; i++) {
         this.workers.push({
           id: i,
-          extractor,
+          extractor: new ConversationExtractor(this.config, this.sharedBrowserContext),
           isBusy: false,
         })
       }
@@ -48,94 +53,106 @@ export class WorkerPool {
   }
 
   async processConversations(conversationsToProcess: ConversationMeta[]): Promise<void> {
-    const conversationQueue = [...conversationsToProcess]
-    const activeExtractionTasks: Promise<void>[] = []
+    const queue: QueueItem[] = conversationsToProcess.map((meta) => ({ meta, attempts: 0 }))
+    const activeTasks: Promise<void>[] = []
 
-    while (conversationQueue.length > 0 || activeExtractionTasks.length > 0) {
-      const availableWorker = this.workers.find((worker) => !worker.isBusy)
+    while (queue.length > 0 || activeTasks.length > 0) {
+      const worker = this.workers.find((w) => !w.isBusy)
 
-      const shouldStartNewTask = availableWorker && conversationQueue.length > 0
-      if (shouldStartNewTask) {
-        const conversationMetadata = conversationQueue.shift()!
-        availableWorker.isBusy = true
+      if (worker && queue.length > 0) {
+        const item = queue.shift()!
+        worker.isBusy = true
 
-        const extractionTask = (async () => {
-          try {
-            const extractionResult = await availableWorker.extractor.extract(
-              conversationMetadata.url
-            )
-            const existingContentHash = this.checkpointManager.getContentHash(
-              conversationMetadata.id
-            )
-
-            const isUpToDate =
-              existingContentHash && existingContentHash === extractionResult.contentHash
-            const currentProgress = this.checkpointManager.getProcessingProgress()
-            const progressLabel = `[${currentProgress.processed}/${currentProgress.total}]`
-
-            if (isUpToDate) {
-              this.checkpointManager.markAsProcessed(conversationMetadata.id)
-              logger.info(`${progressLabel} Up to date: ${extractionResult.title} (skipped write)`)
-            } else {
-              this.fileWriter.write(extractionResult)
-              this.checkpointManager.markAsProcessed(
-                conversationMetadata.id,
-                extractionResult.contentHash
-              )
-              logger.info(`${progressLabel} Processed: ${extractionResult.title}`)
-            }
-          } catch (error) {
-            errorBus.emitError(`Failed to process ${conversationMetadata.url}`, error)
-
-            const isContextLostError =
-              error instanceof Error && error.message.includes('context is no longer available')
-            if (isContextLostError) {
-              logger.warn('Browser context lost. Refreshing worker context...')
-              await this.refreshContext()
-            }
-          } finally {
-            availableWorker.isBusy = false
-          }
-        })()
-
-        activeExtractionTasks.push(extractionTask)
-
-        extractionTask.finally(() => {
-          const taskIndex = activeExtractionTasks.indexOf(extractionTask)
-          const isTaskInList = taskIndex > -1
-          if (isTaskInList) {
-            activeExtractionTasks.splice(taskIndex, 1)
-          }
+        const task = this.runExtraction(worker, item, queue).finally(() => {
+          worker.isBusy = false
+          activeTasks.splice(activeTasks.indexOf(task), 1)
         })
+
+        activeTasks.push(task)
       } else {
-        const POLLING_INTERVAL_MS = 100
         await new Promise((resolve) => setTimeout(resolve, POLLING_INTERVAL_MS))
       }
+    }
+
+    const failedCount =
+      conversationsToProcess.length - this.checkpointManager.getProcessingProgress().processed
+    if (failedCount > 0) {
+      logger.warn(`${failedCount} conversation(s) failed and will be retried on next run.`)
     }
   }
 
   async close(): Promise<void> {
-    const isContextOpen = !!this.sharedBrowserContext
-    if (isContextOpen) {
-      await this.sharedBrowserContext!.close().catch(() => {
-        // Silently handle close errors
-      })
+    await this.sharedBrowserContext?.close().catch(() => {})
+  }
+
+  private async runExtraction(
+    worker: ExtractionWorker,
+    item: QueueItem,
+    queue: QueueItem[]
+  ): Promise<void> {
+    try {
+      const result = await worker.extractor.extract(item.meta.url)
+      await this.handleSuccess(worker, item.meta, result)
+    } catch (error) {
+      await this.handleFailure(worker, item, queue, error)
+    }
+  }
+
+  private async handleSuccess(
+    worker: ExtractionWorker,
+    meta: ConversationMeta,
+    result: Awaited<ReturnType<ConversationExtractor['extract']>>
+  ): Promise<void> {
+    const existingHash = this.checkpointManager.getContentHash(meta.id)
+    const { processed, total } = this.checkpointManager.getProcessingProgress()
+    const progressLabel = `[${processed}/${total}]`
+
+    if (existingHash && existingHash === result.contentHash) {
+      this.checkpointManager.markAsProcessed(meta.id)
+      logger.info(`${progressLabel} Up to date: ${result.title} (skipped write)`)
+    } else {
+      this.fileWriter.write(result)
+      this.checkpointManager.markAsProcessed(meta.id, result.contentHash)
+      logger.info(`${progressLabel} Processed: ${result.title}`)
+    }
+
+    worker.extractor.recoverTimeout()
+  }
+
+  private async handleFailure(
+    worker: ExtractionWorker,
+    item: QueueItem,
+    queue: QueueItem[],
+    error: unknown
+  ): Promise<void> {
+    const isTimeout = error instanceof Error && error.message.includes('API response timeout')
+    const isContextLost =
+      error instanceof Error && error.message.includes('context is no longer available')
+
+    if (isTimeout) worker.extractor.reduceTimeout()
+
+    if (isContextLost) {
+      logger.warn('Browser context lost. Refreshing worker context...')
+      await this.refreshContext()
+    }
+
+    if (item.attempts < MAX_RETRIES) {
+      item.attempts++
+      logger.warn(`Retrying ${item.meta.url} (attempt ${item.attempts}/${MAX_RETRIES})...`)
+      queue.push(item)
+    } else {
+      errorBus.emitError(`Failed to process ${item.meta.url} after ${MAX_RETRIES} retries`, error)
     }
   }
 
   private async refreshContext(): Promise<void> {
     if (this.isRefreshing) return
     this.isRefreshing = true
-
     try {
-      if (this.sharedBrowserContext) {
-        await this.sharedBrowserContext.close().catch(() => {})
-      }
-
+      await this.sharedBrowserContext?.close().catch(() => {})
       this.sharedBrowserContext = await this.browser.newContext({
         storageState: this.config.authStoragePath,
       })
-
       for (const worker of this.workers) {
         worker.extractor = new ConversationExtractor(this.config, this.sharedBrowserContext)
       }

@@ -100,6 +100,12 @@ export class ConversationExtractor {
     }
   }
 
+  private static readonly TIMEOUT_MAX_MS = 30_000
+  private static readonly TIMEOUT_MIN_MS = 8_000
+  private static readonly TIMEOUT_STEP_DOWN_MS = 3_000
+  private static readonly TIMEOUT_STEP_UP_MS = 1_000
+
+  private currentTimeoutMs = ConversationExtractor.TIMEOUT_MAX_MS
   private readonly diagnostics: ApiDiagnosticsWriter
 
   constructor(
@@ -107,6 +113,21 @@ export class ConversationExtractor {
     private readonly context: BrowserContext
   ) {
     this.diagnostics = new ApiDiagnosticsWriter(config)
+  }
+
+  reduceTimeout(): void {
+    this.currentTimeoutMs = Math.max(
+      ConversationExtractor.TIMEOUT_MIN_MS,
+      this.currentTimeoutMs - ConversationExtractor.TIMEOUT_STEP_DOWN_MS
+    )
+    logger.debug(`[extractor] timeout reduced to ${this.currentTimeoutMs}ms`)
+  }
+
+  recoverTimeout(): void {
+    this.currentTimeoutMs = Math.min(
+      ConversationExtractor.TIMEOUT_MAX_MS,
+      this.currentTimeoutMs + ConversationExtractor.TIMEOUT_STEP_UP_MS
+    )
   }
 
   async extract(conversationUrl: string): Promise<ExtractedConversation> {
@@ -165,11 +186,9 @@ export class ConversationExtractor {
     let isRequestResolved = false
 
     return new Promise((resolve) => {
-      const API_TIMEOUT_MS = 30000
       const timeoutId = setTimeout(() => {
         if (!isRequestResolved) {
-          const hasAccumulatedEntries = accumulatedEntries.length > 0
-          if (hasAccumulatedEntries) {
+          if (accumulatedEntries.length > 0) {
             logger.info(
               `API response timeout – resolving with ${accumulatedEntries.length} accumulated entries`
             )
@@ -180,7 +199,7 @@ export class ConversationExtractor {
           }
           isRequestResolved = true
         }
-      }, API_TIMEOUT_MS)
+      }, this.currentTimeoutMs)
 
       page.on('response', async (response: Response) => {
         if (isRequestResolved) return
@@ -193,7 +212,6 @@ export class ConversationExtractor {
           responseUrl.includes('list_pinned')
 
         if (!isThreadApiRequest || isListRequest) return
-
         if (page.isClosed()) return
 
         try {
@@ -217,6 +235,7 @@ export class ConversationExtractor {
 
             const hasNextPage =
               !Array.isArray(responseData) && responseData.collection_info?.has_next_page === true
+
             if (!hasNextPage) {
               clearTimeout(timeoutId)
               isRequestResolved = true
@@ -240,7 +259,6 @@ export class ConversationExtractor {
       waitUntil: 'domcontentloaded',
       timeout: NAVIGATION_TIMEOUT_MS,
     })
-
     this.validateNavigationResponse(navigationResponse)
   }
 
@@ -293,13 +311,9 @@ export class ConversationExtractor {
         .safeParse(formattedEntries)
 
       if (!entriesValidationResult.success) {
-        const isEmptyEntries = formattedEntries.length === 0
-        if (isEmptyEntries) {
+        if (formattedEntries.length === 0) {
           this.diagnostics
-            .writeFailure({
-              url: conversationUrl,
-              errorType: 'empty_entries',
-            })
+            .writeFailure({ url: conversationUrl, errorType: 'empty_entries' })
             .catch(() => {})
         }
         logger.warn(
@@ -321,8 +335,7 @@ export class ConversationExtractor {
       const contentHash = this.hashEntries(validatedEntries)
       const markdownContent = this.convertEntriesToMarkdown(validatedEntries, title)
 
-      const isContentEmpty = !markdownContent
-      if (isContentEmpty) {
+      if (!markdownContent) {
         logger.warn(`Thread has empty content after formatting: ${conversationUrl}`)
         return null
       }
@@ -342,35 +355,19 @@ export class ConversationExtractor {
   }
 
   private ensureEntriesFormat(data: unknown, url: string): unknown[] {
-    const isDataArray = Array.isArray(data)
-    if (isDataArray) {
-      return data as unknown[]
-    }
+    if (Array.isArray(data)) return data as unknown[]
 
     const dataObject = data as Record<string, unknown>
-    const hasEntriesArray = dataObject && Array.isArray(dataObject.entries)
-    if (hasEntriesArray) {
-      return dataObject.entries as unknown[]
-    }
+    if (dataObject && Array.isArray(dataObject.entries)) return dataObject.entries as unknown[]
+    if (dataObject && (dataObject.query_str || dataObject.blocks)) return [data]
 
-    const isSingleEntry = dataObject && (dataObject.query_str || dataObject.blocks)
-    if (isSingleEntry) {
-      return [data]
-    }
-
-    this.diagnostics
-      .writeFailure({
-        url,
-        errorType: 'unknown_shape',
-      })
-      .catch(() => {})
+    this.diagnostics.writeFailure({ url, errorType: 'unknown_shape' }).catch(() => {})
 
     return []
   }
 
   private extractIdFromUrl(url: string): string {
-    const CONVERSATION_ID_REGEX = /\/search\/([^/?]+)/
-    const match = url.match(CONVERSATION_ID_REGEX)
+    const match = url.match(/\/search\/([^/?]+)/)
     return match?.[1] ?? 'unknown'
   }
 
@@ -380,35 +377,25 @@ export class ConversationExtractor {
   }
 
   private convertEntriesToMarkdown(entries: unknown[], threadTitle: string): string {
-    let markdownAccumulator = ''
+    let markdown = ''
     const typedEntries = entries as any[]
 
     for (let i = 0; i < typedEntries.length; i++) {
-      const currentEntry = typedEntries[i]
-      let questionText = currentEntry.query_str ?? ''
+      const entry = typedEntries[i]
+      let question = entry.query_str ?? (i === 0 ? threadTitle : 'Follow‑up')
 
-      const isMissingQuestion = !questionText
-      if (isMissingQuestion) {
-        const isFirstEntry = i === 0
-        questionText = isFirstEntry ? threadTitle : 'Follow‑up'
-      }
-
-      let answerAccumulator = ''
-      for (const currentBlock of currentEntry.blocks ?? []) {
-        if (currentBlock.markdown_block?.answer) {
-          answerAccumulator += currentBlock.markdown_block.answer + '\n\n'
+      let answer = ''
+      for (const block of entry.blocks ?? []) {
+        if (block.markdown_block?.answer) {
+          answer += block.markdown_block.answer + '\n\n'
         }
       }
 
-      if (questionText) {
-        markdownAccumulator += `## ${questionText}\n\n`
-      }
-      if (answerAccumulator) {
-        markdownAccumulator += `${answerAccumulator.trim()}\n\n`
-      }
-      markdownAccumulator += '---\n\n'
+      if (question) markdown += `## ${question}\n\n`
+      if (answer) markdown += `${answer.trim()}\n\n`
+      markdown += '---\n\n'
     }
 
-    return markdownAccumulator.trim()
+    return markdown.trim()
   }
 }
