@@ -4,7 +4,6 @@ import { z } from 'zod'
 import { type Page, type BrowserContext, type Response } from '@playwright/test'
 import { logger } from '../utils/logger.js'
 import { waitStrategy } from '../utils/wait-strategy.js'
-import { ApiDiagnosticsWriter } from '../utils/api-diagnostics.js'
 import { type Config } from '../utils/config.js'
 
 export interface ConversationMessage {
@@ -43,19 +42,6 @@ export class ConversationExtractor {
     query_str: z.string().optional(),
     blocks: z.array(ConversationExtractor.BlockSchema).optional(),
   })
-
-  private static readonly ApiResponseSchema = z.union([
-    z.array(ConversationExtractor.EntrySchema),
-    z.object({
-      entries: z.array(ConversationExtractor.EntrySchema),
-      background_entries: z.array(z.unknown()).optional(),
-      collection_info: z
-        .object({
-          has_next_page: z.boolean().optional(),
-        })
-        .optional(),
-    }),
-  ])
 
   static readonly ExtractionError = class extends Error {
     constructor(message: string) {
@@ -106,35 +92,14 @@ export class ConversationExtractor {
     }
   }
 
-  private static readonly TIMEOUT_MAX_MS = 30_000
-  private static readonly TIMEOUT_MIN_MS = 8_000
-  private static readonly TIMEOUT_STEP_DOWN_MS = 3_000
-  private static readonly TIMEOUT_STEP_UP_MS = 1_000
-
-  private currentTimeoutMs = ConversationExtractor.TIMEOUT_MAX_MS
-  private readonly diagnostics: ApiDiagnosticsWriter
-
   constructor(
     private readonly config: Config,
     private readonly context: BrowserContext
-  ) {
-    this.diagnostics = new ApiDiagnosticsWriter(config)
-  }
+  ) {}
 
-  reduceTimeout(): void {
-    this.currentTimeoutMs = Math.max(
-      ConversationExtractor.TIMEOUT_MIN_MS,
-      this.currentTimeoutMs - ConversationExtractor.TIMEOUT_STEP_DOWN_MS
-    )
-    logger.debug(`[extractor] timeout reduced to ${this.currentTimeoutMs}ms`)
-  }
+  reduceTimeout(): void {}
 
-  recoverTimeout(): void {
-    this.currentTimeoutMs = Math.min(
-      ConversationExtractor.TIMEOUT_MAX_MS,
-      this.currentTimeoutMs + ConversationExtractor.TIMEOUT_STEP_UP_MS
-    )
-  }
+  recoverTimeout(): void {}
 
   async extract(conversationUrl: string): Promise<ExtractedConversation> {
     await this.ensureContextIsAlive()
@@ -147,16 +112,12 @@ export class ConversationExtractor {
       throw new ConversationExtractor.ExtractionError(`Failed to create new page: ${errorMessage}`)
     }
 
-    const apiResponsePromise = this.captureConversationApiResponse(conversationPage)
-
     try {
       await this.navigateToConversationUrl(conversationPage, conversationUrl)
       await waitStrategy(this.config).afterScroll(conversationPage)
 
-      const capturedApiData = await apiResponsePromise
-      if (!capturedApiData) {
-        throw new ConversationExtractor.NoDataError('API response timeout or not found')
-      }
+      const conversationId = this.extractIdFromUrl(conversationUrl)
+      const capturedApiData = await this.fetchThreadData(conversationPage, conversationId)
 
       const extractedConversation = this.parseConversationData(capturedApiData, conversationUrl)
       if (!extractedConversation) {
@@ -176,6 +137,40 @@ export class ConversationExtractor {
     }
   }
 
+  private async fetchThreadData(page: Page, threadId: string): Promise<unknown> {
+    const apiUrl = `https://www.perplexity.ai/rest/thread/${threadId}?version=2.18&source=default`
+
+    const raw = await page.evaluate(
+      async ({ url }: { url: string }) => {
+        const res = await fetch(url, { credentials: 'include' })
+        const text = await res.text()
+        return { status: res.status, body: text }
+      },
+      { url: apiUrl }
+    )
+
+    logger.debug(`[extractor] thread ${threadId}: HTTP ${raw.status}`)
+
+    if (raw.status === 401 || raw.status === 403) {
+      throw new ConversationExtractor.AuthError(`Authentication required (${raw.status})`)
+    }
+    if (raw.status === 404) {
+      throw new ConversationExtractor.NotFoundError('Thread not found (404)')
+    }
+    if (raw.status >= 500) {
+      throw new ConversationExtractor.ServerError(`Server error (${raw.status})`)
+    }
+    if (raw.status !== 200) {
+      throw new ConversationExtractor.ExtractionError(`Thread API returned HTTP ${raw.status}`)
+    }
+
+    try {
+      return JSON.parse(raw.body)
+    } catch {
+      throw new ConversationExtractor.ExtractionError(`Thread API: invalid JSON for ${threadId}`)
+    }
+  }
+
   private async ensureContextIsAlive(): Promise<void> {
     if (!this.context) {
       throw new ConversationExtractor.ExtractionError('Browser context is missing')
@@ -185,78 +180,6 @@ export class ConversationExtractor {
     } catch (_error) {
       throw new ConversationExtractor.ExtractionError('Browser context is no longer available')
     }
-  }
-
-  private captureConversationApiResponse(page: Page): Promise<unknown> {
-    const accumulatedEntries: unknown[] = []
-    let isRequestResolved = false
-
-    return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        if (!isRequestResolved) {
-          if (accumulatedEntries.length > 0) {
-            logger.info(
-              `API response timeout – resolving with ${accumulatedEntries.length} accumulated entries`
-            )
-            resolve({ entries: accumulatedEntries })
-          } else {
-            logger.warn('API response timeout – resolving with null')
-            resolve(null)
-          }
-          isRequestResolved = true
-        }
-      }, this.currentTimeoutMs)
-
-      page.on('response', async (response: Response) => {
-        if (isRequestResolved) return
-
-        const responseUrl = response.url()
-        const isThreadApiRequest = responseUrl.includes('/rest/thread/')
-        const isListRequest =
-          responseUrl.includes('list_ask_threads') ||
-          responseUrl.includes('list_recent') ||
-          responseUrl.includes('list_pinned')
-
-        if (!isThreadApiRequest || isListRequest) return
-        if (page.isClosed()) return
-
-        try {
-          const jsonResponse = await response.json()
-          if (isRequestResolved) return
-
-          const parseResult = ConversationExtractor.ApiResponseSchema.safeParse(jsonResponse)
-
-          if (!parseResult.success) {
-            this.diagnostics
-              .writeFailure({
-                url: response.url(),
-                errorType: 'zod_error',
-                zodErrorPaths: parseResult.error.issues.map((issue) => issue.path.join('.')),
-              })
-              .catch(() => {})
-          } else {
-            const responseData = parseResult.data
-            const currentEntries = Array.isArray(responseData) ? responseData : responseData.entries
-            accumulatedEntries.push(...currentEntries)
-
-            const hasNextPage =
-              !Array.isArray(responseData) && responseData.collection_info?.has_next_page === true
-
-            if (!hasNextPage) {
-              clearTimeout(timeoutId)
-              isRequestResolved = true
-              resolve({ entries: accumulatedEntries })
-            } else {
-              logger.info(
-                `Captured paginated response, ${accumulatedEntries.length} entries so far...`
-              )
-            }
-          }
-        } catch (_error) {
-          // Silent catch for JSON parse errors from non-JSON responses
-        }
-      })
-    })
   }
 
   private async navigateToConversationUrl(page: Page, url: string): Promise<void> {
@@ -317,11 +240,6 @@ export class ConversationExtractor {
         .safeParse(formattedEntries)
 
       if (!entriesValidationResult.success) {
-        if (formattedEntries.length === 0) {
-          this.diagnostics
-            .writeFailure({ url: conversationUrl, errorType: 'empty_entries' })
-            .catch(() => {})
-        }
         logger.warn(
           `Entry validation failed for ${conversationUrl}: ${entriesValidationResult.error.message}`
         )
@@ -369,8 +287,7 @@ export class ConversationExtractor {
     if (dataObject && Array.isArray(dataObject.entries)) return dataObject.entries as unknown[]
     if (dataObject && (dataObject.query_str || dataObject.blocks)) return [data]
 
-    this.diagnostics.writeFailure({ url, errorType: 'unknown_shape' }).catch(() => {})
-
+    logger.warn(`Unknown API response shape for ${url}`)
     return []
   }
 
@@ -397,9 +314,12 @@ export class ConversationExtractor {
       }
 
       let answer = ''
+      const seenAnswers = new Set<string>()
       for (const block of entry.blocks ?? []) {
-        if (block.markdown_block?.answer) {
-          answer += block.markdown_block.answer + '\n\n'
+        const blockAnswer = block.markdown_block?.answer
+        if (blockAnswer && !seenAnswers.has(blockAnswer)) {
+          seenAnswers.add(blockAnswer)
+          answer += blockAnswer + '\n\n'
         }
       }
 

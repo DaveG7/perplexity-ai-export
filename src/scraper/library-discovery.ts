@@ -27,22 +27,30 @@ const VERSIONED_URL_PATTERNS = [
 
 interface RawThread {
   uuid: string
-  slug: string
   title: string
-  query_str: string
-  first_answer: string
-  answer_preview: string
-  last_query_datetime: string
-  mode: string
-  status: string
-  display_model: string
-  thread_access: number
-  has_next_page: boolean
-  total_threads: number
-  collection: Collection | null
-  sources: string[]
-  query_count: number
-  search_focus: string
+  // New format (2026+)
+  link?: string
+  variant?: string
+  unread?: boolean
+  context_uuid?: string
+  task_description?: string | null
+  mode_type?: number
+  // Old format (pre-2026, may still appear)
+  slug?: string
+  query_str?: string
+  first_answer?: string
+  answer_preview?: string | null
+  last_query_datetime?: string
+  mode?: string
+  status?: string
+  display_model?: string
+  thread_access?: number
+  has_next_page?: boolean
+  total_threads?: number
+  collection?: Collection | null
+  sources?: string[]
+  query_count?: number
+  search_focus?: string
   [key: string]: unknown
 }
 
@@ -57,20 +65,28 @@ export interface ConversationMeta {
   id: string
   url: string
   uuid: string
-  slug: string
   title: string
-  query_str: string
-  first_answer: string
-  answer_preview: string
-  last_query_datetime: string
-  mode: string
-  status: string
-  display_model: string
-  thread_access: number
-  collection: Collection | null
-  sources: string[]
-  query_count: number
-  search_focus: string
+  status?: string
+  // New format
+  link?: string
+  variant?: string
+  unread?: boolean
+  context_uuid?: string
+  task_description?: string | null
+  mode_type?: number
+  // Old format
+  slug?: string
+  query_str?: string
+  first_answer?: string
+  answer_preview?: string | null
+  last_query_datetime?: string
+  mode?: string
+  display_model?: string
+  thread_access?: number
+  collection?: Collection | null
+  sources?: string[]
+  query_count?: number
+  search_focus?: string
   [key: string]: unknown
 }
 
@@ -88,10 +104,11 @@ function extractVersionFromUrl(url: string): string | null {
 }
 
 function rawThreadToConversationMeta(thread: RawThread): ConversationMeta {
+  const path = thread.link ?? `/search/${thread.slug ?? thread.uuid}`
   return {
     ...thread,
     id: thread.uuid,
-    url: `${BASE_URL}/search/${thread.slug}`,
+    url: `${BASE_URL}${path}`,
   }
 }
 
@@ -185,7 +202,7 @@ async function fetchThreadBatch(
   }
 
   const threads = parsed as RawThread[]
-  const total = threads[0]?.total_threads ?? 0
+  const total = (threads[0]?.total_threads as number | undefined) ?? 0
 
   return {
     threads,
