@@ -11,3 +11,8 @@ coverage/
 exports*
 debug/
 logs/*.txt
+
+# AI tooling
+.claude/
+.wolf/
+CLAUDE.md
