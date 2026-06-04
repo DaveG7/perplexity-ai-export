@@ -5,6 +5,8 @@ import { type Page, type BrowserContext, type Response } from '@playwright/test'
 import { logger } from '../utils/logger.js'
 import { waitStrategy } from '../utils/wait-strategy.js'
 import { type Config } from '../utils/config.js'
+import { ApiDiagnosticsWriter } from '../utils/api-diagnostics.js'
+import { DEFAULT_API_VERSION } from './api-version.js'
 
 export interface ConversationMessage {
   role: 'user' | 'assistant'
@@ -42,6 +44,33 @@ export class ConversationExtractor {
     query_str: z.string().optional(),
     blocks: z.array(ConversationExtractor.BlockSchema).optional(),
   })
+
+  /**
+   * Validates the top-level shape of the `/rest/thread/{id}` HTTP response,
+   * confirmed against a live 2026 response. The endpoint returns either a bare
+   * array of entries or an object wrapping them; pagination is signalled by the
+   * top-level `has_next_page` / `next_cursor` pair. Fields are optional and the
+   * object is non-strict, so unknown/new keys don't reject an otherwise-valid
+   * response — shape drift is surfaced via diagnostics, and `EntrySchema`
+   * remains the per-entry fallback downstream.
+   */
+  private static readonly ApiResponseSchema = z.union([
+    z.array(ConversationExtractor.EntrySchema),
+    z.object({
+      entries: z.array(ConversationExtractor.EntrySchema),
+      background_entries: z.array(z.unknown()).optional(),
+      has_next_page: z.boolean().optional(),
+      next_cursor: z.string().nullable().optional(),
+      status: z.string().optional(),
+      thread_metadata: z.unknown().optional(),
+      // Legacy/list-style pagination — kept for backward compatibility.
+      collection_info: z
+        .object({
+          has_next_page: z.boolean().optional(),
+        })
+        .optional(),
+    }),
+  ])
 
   static readonly ExtractionError = class extends Error {
     constructor(message: string) {
@@ -92,14 +121,14 @@ export class ConversationExtractor {
     }
   }
 
+  private readonly diagnostics: ApiDiagnosticsWriter
+
   constructor(
     private readonly config: Config,
     private readonly context: BrowserContext
-  ) {}
-
-  reduceTimeout(): void {}
-
-  recoverTimeout(): void {}
+  ) {
+    this.diagnostics = new ApiDiagnosticsWriter(config)
+  }
 
   async extract(conversationUrl: string): Promise<ExtractedConversation> {
     await this.ensureContextIsAlive()
@@ -138,7 +167,7 @@ export class ConversationExtractor {
   }
 
   private async fetchThreadData(page: Page, threadId: string): Promise<unknown> {
-    const apiUrl = `https://www.perplexity.ai/rest/thread/${threadId}?version=2.18&source=default`
+    const apiUrl = `https://www.perplexity.ai/rest/thread/${threadId}?version=${DEFAULT_API_VERSION}&source=default`
 
     const raw = await page.evaluate(
       async ({ url }: { url: string }) => {
@@ -164,11 +193,38 @@ export class ConversationExtractor {
       throw new ConversationExtractor.ExtractionError(`Thread API returned HTTP ${raw.status}`)
     }
 
+    let parsed: unknown
     try {
-      return JSON.parse(raw.body)
+      parsed = JSON.parse(raw.body)
     } catch {
       throw new ConversationExtractor.ExtractionError(`Thread API: invalid JSON for ${threadId}`)
     }
+
+    // Validate the HTTP response shape. On drift we record a diagnostic and fall
+    // through — the per-entry EntrySchema downstream is the resilient fallback,
+    // so a shape change is surfaced without breaking extraction.
+    const shapeResult = ConversationExtractor.ApiResponseSchema.safeParse(parsed)
+    if (!shapeResult.success) {
+      logger.warn(`[extractor] thread ${threadId}: unexpected response shape (see api-diagnostics)`)
+      this.diagnostics
+        .writeFailure({
+          url: apiUrl,
+          errorType: 'zod_error',
+          zodErrorPaths: shapeResult.error.issues.map((issue) => issue.path.join('.')),
+        })
+        .catch(() => {})
+    } else if (!Array.isArray(shapeResult.data)) {
+      const data = shapeResult.data
+      const hasNextPage = data.has_next_page ?? data.collection_info?.has_next_page
+      if (hasNextPage === true) {
+        logger.warn(
+          `[extractor] thread ${threadId}: response reports has_next_page; ` +
+            'additional pages are not fetched and content may be truncated'
+        )
+      }
+    }
+
+    return parsed
   }
 
   private async ensureContextIsAlive(): Promise<void> {
@@ -240,6 +296,11 @@ export class ConversationExtractor {
         .safeParse(formattedEntries)
 
       if (!entriesValidationResult.success) {
+        if (formattedEntries.length === 0) {
+          this.diagnostics
+            .writeFailure({ url: conversationUrl, errorType: 'empty_entries' })
+            .catch(() => {})
+        }
         logger.warn(
           `Entry validation failed for ${conversationUrl}: ${entriesValidationResult.error.message}`
         )
@@ -288,6 +349,7 @@ export class ConversationExtractor {
     if (dataObject && (dataObject.query_str || dataObject.blocks)) return [data]
 
     logger.warn(`Unknown API response shape for ${url}`)
+    this.diagnostics.writeFailure({ url, errorType: 'unknown_shape' }).catch(() => {})
     return []
   }
 

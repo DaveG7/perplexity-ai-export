@@ -92,14 +92,13 @@ export class WorkerPool {
   ): Promise<void> {
     try {
       const result = await worker.extractor.extract(item.meta.url)
-      await this.handleSuccess(worker, item.meta, result)
+      await this.handleSuccess(item.meta, result)
     } catch (error) {
-      await this.handleFailure(worker, item, queue, error)
+      await this.handleFailure(item, queue, error)
     }
   }
 
   private async handleSuccess(
-    worker: ExtractionWorker,
     meta: ConversationMeta,
     result: Awaited<ReturnType<ConversationExtractor['extract']>>
   ): Promise<void> {
@@ -115,21 +114,11 @@ export class WorkerPool {
       this.checkpointManager.markAsProcessed(meta.id, result.contentHash)
       logger.info(`${progressLabel} Processed: ${result.title}`)
     }
-
-    worker.extractor.recoverTimeout()
   }
 
-  private async handleFailure(
-    worker: ExtractionWorker,
-    item: QueueItem,
-    queue: QueueItem[],
-    error: unknown
-  ): Promise<void> {
-    const isTimeout = error instanceof Error && error.message.includes('API response timeout')
+  private async handleFailure(item: QueueItem, queue: QueueItem[], error: unknown): Promise<void> {
     const isContextLost =
       error instanceof Error && error.message.includes('context is no longer available')
-
-    if (isTimeout) worker.extractor.reduceTimeout()
 
     if (isContextLost) {
       logger.warn('Browser context lost. Refreshing worker context...')

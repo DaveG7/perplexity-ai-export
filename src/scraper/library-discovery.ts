@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 import { logger } from '../utils/logger.js'
+import { DEFAULT_API_VERSION } from './api-version.js'
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -120,13 +121,13 @@ async function detectApiVersion(page: Page): Promise<string> {
       (res) => VERSIONED_URL_PATTERNS.some((p) => res.url().includes(p)) && res.status() === 200,
       { timeout: 15_000 }
     )
-    const version = extractVersionFromUrl(response.url()) ?? '2.18'
+    const version = extractVersionFromUrl(response.url()) ?? DEFAULT_API_VERSION
     const pathname = new URL(response.url()).pathname
     logger.debug(`Detected API version: ${version} (from ${pathname})`)
     return version
   } catch {
-    logger.debug('Version detection timeout — using fallback 2.18')
-    return '2.18'
+    logger.debug(`Version detection timeout — using fallback ${DEFAULT_API_VERSION}`)
+    return DEFAULT_API_VERSION
   }
 }
 

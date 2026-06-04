@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ConversationExtractor } from '../../src/scraper/conversation-extractor.js'
+import { logger } from '../../src/utils/logger.js'
 import type { BrowserContext, Page } from '@playwright/test'
 
 describe('ConversationExtractor (Unit)', () => {
@@ -223,6 +224,76 @@ describe('ConversationExtractor (Unit)', () => {
       await (extractor as any).fetchThreadData(page, 'my-thread-id').catch(() => {})
       const callArg = (page.evaluate as any).mock.calls[0][1]
       expect(callArg.url).toContain('/rest/thread/my-thread-id')
+    })
+
+    it('returns valid data and writes no diagnostic when the shape matches', async () => {
+      // Mirrors the real 2026 /rest/thread/{id} shape: top-level entries +
+      // background_entries + has_next_page/next_cursor + extra metadata keys.
+      const payload = {
+        entries: [{ thread_title: 'Test', query_str: 'q', blocks: [] }],
+        background_entries: [],
+        has_next_page: false,
+        next_cursor: null,
+        status: 'success',
+        thread_metadata: { title: 'Test' },
+      }
+      const writeFailure = vi.spyOn((extractor as any).diagnostics, 'writeFailure')
+      const page = makePage(200, JSON.stringify(payload))
+      const result = await (extractor as any).fetchThreadData(page, 'abc-123')
+      expect(result).toEqual(payload)
+      expect(writeFailure).not.toHaveBeenCalled()
+    })
+
+    it('warns (without failing) when the response reports top-level has_next_page', async () => {
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+      const payload = {
+        entries: [{ thread_title: 'Test', query_str: 'q', blocks: [] }],
+        has_next_page: true,
+        next_cursor: 'cursor-abc',
+      }
+      const page = makePage(200, JSON.stringify(payload))
+      const result = await (extractor as any).fetchThreadData(page, 'abc-123')
+      expect(result).toEqual(payload)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('has_next_page'))
+    })
+
+    it('still returns the body but records a zod_error diagnostic on shape drift', async () => {
+      const writeFailure = vi
+        .spyOn((extractor as any).diagnostics, 'writeFailure')
+        .mockResolvedValue(undefined)
+      // entries must be an array of objects; a string violates the schema
+      const page = makePage(200, '{"entries":"not-an-array"}')
+      const result = await (extractor as any).fetchThreadData(page, 'abc-123')
+      expect(result).toEqual({ entries: 'not-an-array' })
+      expect(writeFailure).toHaveBeenCalledWith(expect.objectContaining({ errorType: 'zod_error' }))
+    })
+  })
+
+  // ─── diagnostics on parse failures ──────────────────────────────────────────
+
+  describe('diagnostics', () => {
+    it('writes an unknown_shape diagnostic for an unrecognised response shape', () => {
+      const writeFailure = vi
+        .spyOn((extractor as any).diagnostics, 'writeFailure')
+        .mockResolvedValue(undefined)
+      ;(extractor as any).ensureEntriesFormat({ foo: 'bar' }, 'http://test.com')
+      expect(writeFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ errorType: 'unknown_shape' })
+      )
+    })
+
+    it('writes an empty_entries diagnostic when there are no entries to validate', () => {
+      const writeFailure = vi
+        .spyOn((extractor as any).diagnostics, 'writeFailure')
+        .mockResolvedValue(undefined)
+      const result = (extractor as any).parseConversationData(
+        { foo: 'bar' },
+        'https://www.perplexity.ai/search/test-id'
+      )
+      expect(result).toBeNull()
+      expect(writeFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ errorType: 'empty_entries' })
+      )
     })
   })
 })
