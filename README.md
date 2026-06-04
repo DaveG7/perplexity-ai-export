@@ -17,16 +17,16 @@
 - [Introduction](#introduction)
 - [Key Features](#key-features)
 - [Environment Setup Guide](#environment-setup-guide)
-  * [1. Install Node.js (The Engine)](#1-install-nodejs-the-engine)
-  * [2. Install Ollama (Optional - For AI Intelligence)](#2-install-ollama-optional---for-ai-intelligence)
-  * [3. Download and Prepare the Project](#3-download-and-prepare-the-project)
+  - [1. Install Node.js (The Engine)](#1-install-nodejs-the-engine)
+  - [2. Install Ollama (Optional - For AI Intelligence)](#2-install-ollama-optional---for-ai-intelligence)
+  - [3. Download and Prepare the Project](#3-download-and-prepare-the-project)
 - [Configuration](#configuration)
-  * [Key Environment Variables](#key-environment-variables)
+  - [Key Environment Variables](#key-environment-variables)
 - [Usage Guide](#usage-guide)
-  * [Operational Directives](#operational-directives)
+  - [Operational Directives](#operational-directives)
 - [RAG Capabilities](#rag-capabilities)
 - [Architecture & Deep Dive](#architecture--deep-dive)
-  * [Project Structure](#project-structure)
+  - [Project Structure](#project-structure)
 - [Diagnostics](#diagnostics)
 - [Testing](#testing)
 - [Benchmarking](#benchmarking)
@@ -151,7 +151,7 @@ The pipeline runs three enhancement stages automatically:
 
 For a detailed look at our RAG implementation, hybrid search strategy, and theoretical foundations, please refer to:
 
-👉 **[ARCH.md](./ARCH.md)**
+👉 **[ARCH.md](./docs/ARCH.md)**
 
 ### Project Structure
 
@@ -187,4 +187,4 @@ npm run benchmark
 
 Requires a built vector index and a running Ollama instance. The benchmark runs a set of predefined queries end-to-end through the full pipeline (HyDE → hybrid search → cross-encoder reranking → MapReduce → synthesis) and reports per-query latency and success rate. Edit `BENCHMARK_QUERIES` in `src/benchmark.ts` to tailor queries to your history.
 
-👉 **[BENCHMARKS.md](./BENCHMARKS.md)**: Full details on each benchmark, why the metrics were chosen, how to interpret results, and how to write effective custom queries.
+👉 **[BENCHMARKS.md](./docs/BENCHMARKS.md)**: Full details on each benchmark, why the metrics were chosen, how to interpret results, and how to write effective custom queries.
