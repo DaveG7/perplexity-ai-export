@@ -244,17 +244,45 @@ describe('ConversationExtractor (Unit)', () => {
       expect(writeFailure).not.toHaveBeenCalled()
     })
 
-    it('warns (without failing) when the response reports top-level has_next_page', async () => {
-      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    it('returns the single page unchanged when there is no next page', async () => {
       const payload = {
         entries: [{ thread_title: 'Test', query_str: 'q', blocks: [] }],
-        has_next_page: true,
-        next_cursor: 'cursor-abc',
+        background_entries: [],
+        has_next_page: false,
+        next_cursor: null,
       }
       const page = makePage(200, JSON.stringify(payload))
       const result = await (extractor as any).fetchThreadData(page, 'abc-123')
       expect(result).toEqual(payload)
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('has_next_page'))
+      expect(page.evaluate as any).toHaveBeenCalledTimes(1)
+    })
+
+    it('accumulates entries across cursor pages until has_next_page is false', async () => {
+      const page1 = {
+        entries: [{ query_str: 'q1', blocks: [] }],
+        background_entries: [],
+        has_next_page: true,
+        next_cursor: 'cur-1',
+      }
+      const page2 = {
+        entries: [{ query_str: 'q2', blocks: [] }],
+        background_entries: [],
+        has_next_page: false,
+        next_cursor: null,
+      }
+      const evaluate = vi
+        .fn()
+        .mockResolvedValueOnce({ status: 200, body: JSON.stringify(page1) })
+        .mockResolvedValueOnce({ status: 200, body: JSON.stringify(page2) })
+      const page = { evaluate } as unknown as Page
+
+      const result: any = await (extractor as any).fetchThreadData(page, 'abc-123')
+
+      expect(evaluate).toHaveBeenCalledTimes(2)
+      expect(result.entries.map((e: any) => e.query_str)).toEqual(['q1', 'q2'])
+      expect(result.has_next_page).toBe(false)
+      // the second request must carry the cursor returned by page 1
+      expect((evaluate.mock.calls[1][1] as any).url).toContain('cursor=cur-1')
     })
 
     it('still returns the body but records a zod_error diagnostic on shape drift', async () => {

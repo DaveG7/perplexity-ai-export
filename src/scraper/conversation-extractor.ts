@@ -166,8 +166,72 @@ export class ConversationExtractor {
     }
   }
 
+  // Safety cap on cursor pagination (~99 entries/page, so ~5k entries).
+  private static readonly MAX_PAGES = 50
+
   private async fetchThreadData(page: Page, threadId: string): Promise<unknown> {
-    const apiUrl = `https://www.perplexity.ai/rest/thread/${threadId}?version=${DEFAULT_API_VERSION}&source=default`
+    const firstParsed = await this.fetchThreadPage(page, threadId, null)
+    const firstObj =
+      firstParsed && !Array.isArray(firstParsed) ? (firstParsed as Record<string, unknown>) : null
+
+    let cursor = typeof firstObj?.next_cursor === 'string' ? firstObj.next_cursor : null
+
+    // Fast path: the whole thread fit in one response (the common case).
+    if (firstObj?.has_next_page !== true || !cursor) {
+      return firstParsed
+    }
+
+    // Long thread: walk the cursor pages and accumulate entries in API order
+    // (the endpoint paginates in conversation order — the same order the previous
+    // response-listener relied on, so no reordering is needed here).
+    const entries: unknown[] = Array.isArray(firstObj.entries) ? [...firstObj.entries] : []
+    const backgroundEntries: unknown[] = Array.isArray(firstObj.background_entries)
+      ? [...firstObj.background_entries]
+      : []
+    let pageCount = 1
+
+    while (cursor && pageCount < ConversationExtractor.MAX_PAGES) {
+      const parsed = await this.fetchThreadPage(page, threadId, cursor)
+      const obj = Array.isArray(parsed)
+        ? { entries: parsed as unknown[] }
+        : (parsed as Record<string, unknown>)
+
+      if (Array.isArray(obj.entries)) entries.push(...obj.entries)
+      if (Array.isArray(obj.background_entries)) backgroundEntries.push(...obj.background_entries)
+      pageCount++
+
+      cursor =
+        obj.has_next_page === true && typeof obj.next_cursor === 'string' ? obj.next_cursor : null
+    }
+
+    if (cursor) {
+      logger.warn(
+        `[extractor] thread ${threadId}: stopped at the ${ConversationExtractor.MAX_PAGES}-page ` +
+          'cap; export may be truncated'
+      )
+    }
+    logger.debug(
+      `[extractor] thread ${threadId}: assembled ${entries.length} entries from ${pageCount} pages`
+    )
+
+    // Preserve the first page's top-level metadata, but with the full entry set.
+    return {
+      ...firstObj,
+      entries,
+      background_entries: backgroundEntries,
+      has_next_page: false,
+      next_cursor: null,
+    }
+  }
+
+  /** Fetches and validates a single page of the thread API (cursor = null for page 1). */
+  private async fetchThreadPage(
+    page: Page,
+    threadId: string,
+    cursor: string | null
+  ): Promise<unknown> {
+    let apiUrl = `https://www.perplexity.ai/rest/thread/${threadId}?version=${DEFAULT_API_VERSION}&source=default`
+    if (cursor) apiUrl += `&cursor=${encodeURIComponent(cursor)}`
 
     const raw = await page.evaluate(
       async ({ url }: { url: string }) => {
@@ -178,7 +242,7 @@ export class ConversationExtractor {
       { url: apiUrl }
     )
 
-    logger.debug(`[extractor] thread ${threadId}: HTTP ${raw.status}`)
+    logger.debug(`[extractor] thread ${threadId}: HTTP ${raw.status}${cursor ? ' (paged)' : ''}`)
 
     if (raw.status === 401 || raw.status === 403) {
       throw new ConversationExtractor.AuthError(`Authentication required (${raw.status})`)
@@ -213,15 +277,6 @@ export class ConversationExtractor {
           zodErrorPaths: shapeResult.error.issues.map((issue) => issue.path.join('.')),
         })
         .catch(() => {})
-    } else if (!Array.isArray(shapeResult.data)) {
-      const data = shapeResult.data
-      const hasNextPage = data.has_next_page ?? data.collection_info?.has_next_page
-      if (hasNextPage === true) {
-        logger.warn(
-          `[extractor] thread ${threadId}: response reports has_next_page; ` +
-            'additional pages are not fetched and content may be truncated'
-        )
-      }
     }
 
     return parsed
