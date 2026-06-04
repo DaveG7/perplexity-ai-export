@@ -151,7 +151,7 @@ The pipeline runs three enhancement stages automatically:
 
 For a detailed look at our RAG implementation, hybrid search strategy, and theoretical foundations, please refer to:
 
-👉 **[ARCH.md](./ARCH.md)**
+👉 **[ARCH.md](./docs/ARCH.md)**
 
 ### Project Structure
 
@@ -187,4 +187,4 @@ npm run benchmark
 
 Requires a built vector index and a running Ollama instance. The benchmark runs a set of predefined queries end-to-end through the full pipeline (HyDE → hybrid search → cross-encoder reranking → MapReduce → synthesis) and reports per-query latency and success rate. Edit `BENCHMARK_QUERIES` in `src/benchmark.ts` to tailor queries to your history.
 
-👉 **[BENCHMARKS.md](./BENCHMARKS.md)**: Full details on each benchmark, why the metrics were chosen, how to interpret results, and how to write effective custom queries.
+👉 **[BENCHMARKS.md](./docs/BENCHMARKS.md)**: Full details on each benchmark, why the metrics were chosen, how to interpret results, and how to write effective custom queries.
